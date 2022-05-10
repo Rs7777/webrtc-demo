@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+<body>
+
+  <button style="display: block;" id="btn">开始通话</button>
+  <button style="display: none;" id="cls">挂断</button>
+  <p>本地视频：</p>
+  <video id="local-video" width="500" height="300" muted autoplay></video>
+  <p>远端视频：</p>
+  <video id="remote-video" width="500" height="300" muted autoplay></video>
+
+  <script>
+    const btn = document.getElementById('btn')
+    const cls = document.getElementById('cls')
+    const locVideo = document.getElementById('local-video')
+    const remVideo = document.getElementById('remote-video')
+    let peer = new RTCPeerConnection()
+
+    const ws = new WebSocket('ws://localhost:5001')
+
+    ws.onopen = () => {
+      console.log('ws runing ...')
+    }
+
+    ws.onmessage = async (e) => {
+      const data = JSON.parse(e.data)
+      switch (data.type) {
+        case 'error': 
+          ws.close()
+          alert(data.msg)
+          break
+        case 'offer':
+          startLive(data)
+          break
+        case 'answer':
+          await setRemoteDescription(new RTCSessionDescription(data))
+          break
+        case 'add_ice':
+          addIce(data.data.candidate)
+          break
+        case 'close':
+          closeVideo(data.close)
+          break
+        default:
+          break
+      }
+    }
+
+    // 打开本地视频并添加视频流到peer中
+    btn.onclick = () => { startLive() }
+
+    // 挂断视频
+    cls.onclick = () => {
+      closeVideo()
+      ws.send(JSON.stringify({
+        type: 'close',
+        close: true
+      }))
+    }
+
+    // 开启通话
+    async function startLive (sdp) {
+      if (!peer) peer = new RTCPeerConnection()
+      const stream = await navigator.mediaDevices.getUserMedia({video: true, audio: false})
+      locVideo.srcObject = stream
+      stream.getTracks().forEach(track => {
+        peer.addTrack(track, stream)
+      })
+      btn.style.display = 'none'
+      cls.style.display = 'block'
+
+      peer.ontrack = handleTrack
+      peer.onicecandidate = handleIcecandidate
+
+      if (!sdp) {
+        // 没有sdp为发起方
+        const offer = await peer.createOffer()
+        ws.send(JSON.stringify(offer))
+        await setLocalDescription(offer)
+        return
+      } else {
+        // 接受方
+        await setRemoteDescription(new RTCSessionDescription(sdp))
+        const isUDP = peer.canTrickleIceCandidates
+        if (isUDP) {
+          const answer = await peer.createAnswer()
+          ws.send(JSON.stringify(answer))
+          await setLocalDescription(answer)
+        } else {
+          ws.send(JSON.stringify({
+            type: 'error',
+            msg: 'not support UDP'
+          }))
+        }
+      }
+    }
+
+    // 关闭通话
+    function closeVideo (data) {
+      if (peer) {
+        peer.ontrack = null
+        peer.onicecandidate = null
+        peer.close()
+        peer = null   
+      }
+
+      if (locVideo.srcObject) {
+        locVideo.srcObject.getTracks().forEach(track => track.stop())
+      }
+      if (remVideo.srcObject) {
+        remVideo.srcObject.getTracks().forEach(track => track.stop())
+      }
+
+      locVideo.removeAttribute('srcObject')
+      remVideo.removeAttribute('srcObject')
+      btn.style.display = 'block'
+      cls.style.display = 'none'
+
+      if (data && data.close) {
+        ws.close()
+      }
+    }
+    // 获取视频流事件
+    function handleTrack (event) {
+      if (event && event.streams) {
+        remVideo.srcObject = event.streams[0]
+      }
+    }
+    // 添加ice候选
+    function handleIcecandidate (event) {
+      if (event.candidate) {
+        ws.send(JSON.stringify({
+          type: 'add_ice',
+          data: {
+            candidate: event.candidate
+          }
+        }))
+      }
+    } 
+    // 添加候选事件
+    function addIce (candidate) {
+      if (peer.remoteDescription) {
+        peer.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => {
+          console.log(err);
+        })
+      }
+    }
+    // 设置本地描述
+    async function setLocalDescription (offer) {
+      await peer.setLocalDescription(offer)
+    }
+    // 设置远端描述
+    async function setRemoteDescription (offer) {
+      await peer.setRemoteDescription(offer)
+    }
+  </script>
+</body>
+</html>
